@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🎖️ Soldier Monitoring Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="container">
+
+    <header class="header">
+      <div class="header-left">
+        <h1 class="header-title">🎖️ Central Soldier Monitoring Station</h1>
+        <p class="header-subtitle">Real-time battlefield intelligence — All units monitored live</p>
+      </div>
+      <div class="header-right">
+        <div class="status-group">
+          <span class="status-label">Server</span>
+          <span id="connectionStatus" class="status-badge status-offline">OFFLINE</span>
+        </div>
+        <div class="status-group">
+          <span class="status-label">ESP32 Device</span>
+          <span id="deviceStatus" class="status-badge status-offline">DISCONNECTED</span>
+        </div>
+        <div class="status-group">
+          <span class="status-label">Active Units</span>
+          <span id="activeUnits" class="status-badge status-info">0</span>
+        </div>
+        <div class="status-group">
+          <span class="status-label">Last Update</span>
+          <span id="lastUpdate" class="last-update">Never</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Alerts Bar -->
+    <div id="alertsBar" class="alerts-bar hidden">
+      <div class="alert-content">
+        <span class="alert-icon">🚨</span>
+        <span id="alertMessage" class="alert-message">No alerts</span>
+        <button id="dismissAlert" class="alert-dismiss">✕</button>
+      </div>
+    </div>
+
+    <!-- Summary Bar -->
+    <div class="summary-bar">
+      <div class="summary-item">
+        <span class="summary-icon">👥</span>
+        <span class="summary-label">Total Units</span>
+        <span class="summary-value" id="totalUnits">0</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-icon">✅</span>
+        <span class="summary-label">Normal</span>
+        <span class="summary-value green" id="normalUnits">0</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-icon">⚠️</span>
+        <span class="summary-label">Warning</span>
+        <span class="summary-value yellow" id="warningUnits">0</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-icon">🚨</span>
+        <span class="summary-label">Critical</span>
+        <span class="summary-value red" id="criticalUnits">0</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-icon">❤️</span>
+        <span class="summary-label">Avg Heart Rate</span>
+        <span class="summary-value" id="avgHR">-- BPM</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-icon">🌡️</span>
+        <span class="summary-label">Avg Temp</span>
+        <span class="summary-value" id="avgTemp">--°C</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-icon">⏱️</span>
+        <span class="summary-label">Session Time</span>
+        <span class="summary-value" id="sessionTime">00:00:00</span>
+      </div>
+    </div>
+
+    <!-- Units Grid - Auto creates card for each device -->
+    <div class="units-grid" id="unitsGrid">
+      <div class="waiting-message">
+        <div class="waiting-icon">📡</div>
+        <div class="waiting-text">Waiting for units to connect...</div>
+        <div class="waiting-sub">Connect ESP32 devices to see live data</div>
+      </div>
+    </div>
+
+    <!-- Detail Modal - Click any unit card to open -->
+    <div id="detailModal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="modalTitle">Unit Detail</h2>
+          <button id="closeModal" class="close-btn">✕ Close</button>
+        </div>
+        <div class="modal-body">
+          <div class="detail-grid">
+
+            <div class="card health-card">
+              <h3 class="card-title">❤️ Heart Rate</h3>
+              <div class="big-vital">
+                <div class="big-value" id="modalHR">--</div>
+                <div class="big-unit">BPM</div>
+              </div>
+              <div class="health-status" id="modalHealthStatus">Waiting...</div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-title">📍 GPS Location</h3>
+              <div class="data-grid">
+                <div class="data-item">
+                  <span class="data-label">Latitude</span>
+                  <span class="data-value small" id="modalLat">--</span>
+                </div>
+                <div class="data-item">
+                  <span class="data-label">Longitude</span>
+                  <span class="data-value small" id="modalLng">--</span>
+                </div>
+                <div class="data-item">
+                  <span class="data-label">Speed</span>
+                  <span class="data-value" id="modalSpeed">--</span>
+                </div>
+                <div class="data-item">
+                  <span class="data-label">Satellites</span>
+                  <span class="data-value" id="modalSats">--</span>
+                </div>
+              </div>
+              <div class="gps-status" id="modalGpsStatus">No GPS fix</div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-title">🌡️ Environment</h3>
+              <div class="data-grid">
+                <div class="data-item">
+                  <span class="data-label">Temperature</span>
+                  <span class="data-value" id="modalTemp">--</span>
+                </div>
+                <div class="data-item">
+                  <span class="data-label">Pressure</span>
+                  <span class="data-value" id="modalPressure">--</span>
+                </div>
+              </div>
+              <div class="env-bar">
+                <div class="env-fill" id="modalTempFill" style="width:0%"></div>
+              </div>
+              <div class="env-label">Temperature Range: 0°C — 50°C</div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-title">🏃 Motion / IMU</h3>
+              <div class="motion-section">
+                <div class="motion-label-group">Accelerometer</div>
+                <div class="motion-grid">
+                  <div class="motion-item">
+                    <div class="motion-axis">X</div>
+                    <div class="motion-value" id="modalAX">--</div>
+                  </div>
+                  <div class="motion-item">
+                    <div class="motion-axis">Y</div>
+                    <div class="motion-value" id="modalAY">--</div>
+                  </div>
+                  <div class="motion-item">
+                    <div class="motion-axis">Z</div>
+                    <div class="motion-value" id="modalAZ">--</div>
+                  </div>
+                </div>
+                <div class="motion-label-group">Gyroscope</div>
+                <div class="motion-grid">
+                  <div class="motion-item">
+                    <div class="motion-axis">X</div>
+                    <div class="motion-value" id="modalGX">--</div>
+                  </div>
+                  <div class="motion-item">
+                    <div class="motion-axis">Y</div>
+                    <div class="motion-value" id="modalGY">--</div>
+                  </div>
+                  <div class="motion-item">
+                    <div class="motion-axis">Z</div>
+                    <div class="motion-value" id="modalGZ">--</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-title">🎤 Last Command</h3>
+              <div class="command-display-small">
+                <div class="command-text-small" id="modalCommand">WAITING...</div>
+              </div>
+              <div class="command-meta-small">
+                <span>🕐 <span id="modalCmdTime">--:--:--</span></span>
+                <span>📻 <span id="modalCmdCh">CH: --</span></span>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3 class="card-title">📊 Unit Statistics</h3>
+              <div class="data-grid">
+                <div class="data-item">
+                  <span class="data-label">Avg Heart Rate</span>
+                  <span class="data-value" id="modalAvgHR">--</span>
+                </div>
+                <div class="data-item">
+                  <span class="data-label">Avg Temp</span>
+                  <span class="data-value" id="modalAvgTemp">--</span>
+                </div>
+                <div class="data-item">
+                  <span class="data-label">Total Packets</span>
+                  <span class="data-value" id="modalPackets">0</span>
+                </div>
+                <div class="data-item">
+                  <span class="data-label">GPS Status</span>
+                  <span class="data-value small" id="modalGPSLabel">--</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card chart-card-modal">
+              <h3 class="card-title">📈 Heart Rate Trend (Last 20 readings)</h3>
+              <canvas id="modalHRChart"></canvas>
+            </div>
+
+            <div class="card chart-card-modal">
+              <h3 class="card-title">📈 Temperature Trend (Last 20 readings)</h3>
+              <canvas id="modalTempChart"></canvas>
+            </div>
+
+            <div class="card history-card-modal">
+              <h3 class="card-title">📜 Command History</h3>
+              <div class="history-list" id="modalHistory">
+                <div class="history-empty">No commands yet</div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
