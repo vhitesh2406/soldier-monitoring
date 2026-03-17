@@ -24,8 +24,13 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ═══════════════════════════════════════════════════════════════════
+// PACKET COUNTER
+// ═══════════════════════════════════════════════════════════════════
+
+let packetCount = 0;
+
+// ═══════════════════════════════════════════════════════════════════
 // ESP32 WiFi HTTP POST ENDPOINT
-// Receives data from Commander ESP32 via WiFi
 // ═══════════════════════════════════════════════════════════════════
 
 app.post('/api/esp32data', async (req, res) => {
@@ -38,17 +43,32 @@ app.post('/api/esp32data', async (req, res) => {
 
     console.log(`📡 [WiFi] Data from ${data.device_id} | CMD: ${data.command} | HR: ${data.health?.hr}`);
 
-    // Send to dashboard via WebSocket
+    packetCount++;
+
+    // ✅ Emit deviceStatus FIRST before anything else!
+    io.emit('deviceStatus', {
+      connected: true,
+      packetsReceived: packetCount,
+      lastDevice: data.device_id,
+      mode: 'WiFi'
+    });
+
+    // ✅ Emit sensor data to dashboard
     io.emit('sensorData', data);
 
-    // Save to database
-    await SensorData.create(data);
+    // ✅ Save to database — non-fatal!
+    try {
+      await SensorData.create(data);
+    } catch (dbErr) {
+      console.error('⚠️  DB error (non-fatal):', dbErr.message);
+    }
 
-    // Check alerts
-    await checkAlerts(data, io);
-
-    // Update device status
-    io.emit('deviceStatus', { connected: true, packetsReceived: ++packetCount });
+    // ✅ Check alerts — non-fatal!
+    try {
+      await checkAlerts(data, io);
+    } catch (alertErr) {
+      console.error('⚠️  Alert error (non-fatal):', alertErr.message);
+    }
 
     res.status(200).json({ success: true, message: 'Data received' });
 
@@ -71,13 +91,7 @@ app.get('/', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// PACKET COUNTER
-// ═══════════════════════════════════════════════════════════════════
-
-let packetCount = 0;
-
-// ═══════════════════════════════════════════════════════════════════
-// SERIAL PORT (USB fallback - when ESP32 connected via USB)
+// SERIAL PORT (USB fallback)
 // ═══════════════════════════════════════════════════════════════════
 
 let serialConnected = false;
@@ -116,11 +130,14 @@ function setupSerial() {
         console.log(`📊 [USB] ${data.device_id} | CMD: ${data.command} | HR: ${data.health?.hr}`);
 
         packetCount++;
-        io.emit('sensorData', data);
         io.emit('deviceStatus', { connected: true, packetsReceived: packetCount });
+        io.emit('sensorData', data);
 
-        await SensorData.create(data);
-        await checkAlerts(data, io);
+        try { await SensorData.create(data); }
+        catch (dbErr) { console.error('⚠️  DB error:', dbErr.message); }
+
+        try { await checkAlerts(data, io); }
+        catch (alertErr) { console.error('⚠️  Alert error:', alertErr.message); }
 
       } catch (e) {
         // Not JSON - skip
@@ -154,25 +171,30 @@ async function checkAlerts(data, io) {
     const id   = data.device_id;
 
     if (hr > 0 && hr < 50) {
-      const alert = await Alert.create(id, 'critical', `❤️ ${id}: Heart rate critically low: ${hr} BPM`);
+      const alert = await Alert.create(id, 'low_heart_rate',
+        `❤️ ${id}: Heart rate critically low: ${hr} BPM`, 'critical');
       if (alert) io.emit('alert', alert);
     } else if (hr > 150) {
-      const alert = await Alert.create(id, 'warning', `❤️ ${id}: Heart rate high: ${hr} BPM`);
+      const alert = await Alert.create(id, 'high_heart_rate',
+        `❤️ ${id}: Heart rate high: ${hr} BPM`, 'warning');
       if (alert) io.emit('alert', alert);
     }
 
     if (temp > 0 && temp > 40) {
-      const alert = await Alert.create(id, 'warning', `🌡️ ${id}: High temperature: ${temp}°C`);
+      const alert = await Alert.create(id, 'high_temp',
+        `🌡️ ${id}: High temperature: ${temp}°C`, 'warning');
       if (alert) io.emit('alert', alert);
     }
 
     if (sats > 0 && sats < 4) {
-      const alert = await Alert.create(id, 'info', `📍 ${id}: Weak GPS signal: ${sats} satellites`);
+      const alert = await Alert.create(id, 'weak_gps',
+        `📍 ${id}: Weak GPS signal: ${sats} satellites`, 'info');
       if (alert) io.emit('alert', alert);
     }
 
     if (data.command === 'EMERGENCY') {
-      const alert = await Alert.create(id, 'critical', `🚨 EMERGENCY signal from ${id}!`);
+      const alert = await Alert.create(id, 'emergency',
+        `🚨 EMERGENCY signal from ${id}!`, 'critical');
       if (alert) io.emit('alert', alert);
     }
 
@@ -188,22 +210,78 @@ async function checkAlerts(data, io) {
 io.on('connection', (socket) => {
   console.log('👁️  Dashboard connected:', socket.id);
 
+  // ✅ Send current status immediately on connect
+  socket.emit('deviceStatus', {
+    connected: packetCount > 0,
+    packetsReceived: packetCount
+  });
+
   socket.on('requestLatest', async () => {
     try {
-      const latest = await SensorData.getLatest();
-      if (latest) socket.emit('sensorData', latest);
-    } catch (e) {}
+      const latest = await SensorData.getLatest(10);
+      if (latest && latest.length > 0) {
+        latest.forEach(record => {
+          // Reconstruct data format for dashboard
+          const data = {
+            device_id: record.device_id,
+            command: record.command,
+            channel: record.channel,
+            timestamp: record.timestamp,
+            health: {
+              hr: record.heart_rate,
+              spo2: record.spo2
+            },
+            gps: {
+              lat: record.gps_lat,
+              lng: record.gps_lng,
+              speed: record.gps_speed,
+              satellites: record.gps_satellites
+            },
+            environment: {
+              temp: record.temperature,
+              pressure: record.pressure
+            },
+            motion: {
+              ax: record.accel_x,
+              ay: record.accel_y,
+              az: record.accel_z,
+              gx: record.gyro_x,
+              gy: record.gyro_y,
+              gz: record.gyro_z
+            }
+          };
+          socket.emit('sensorData', data);
+        });
+      }
+    } catch (e) {
+      console.error('requestLatest error:', e.message);
+    }
   });
 
   socket.on('requestAlerts', async () => {
     try {
-      const alerts = await Alert.getRecent();
+      const alerts = await Alert.getUnacknowledged();
       alerts.forEach(a => socket.emit('alert', a));
-    } catch (e) {}
+    } catch (e) {
+      console.error('requestAlerts error:', e.message);
+    }
   });
 
   socket.on('disconnect', () => {
     console.log('👁️  Dashboard disconnected:', socket.id);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// HEALTH CHECK ENDPOINT
+// ═══════════════════════════════════════════════════════════════════
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    packets: packetCount,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
   });
 });
 
